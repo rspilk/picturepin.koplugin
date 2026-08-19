@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build plugin zip
+        run: |
+          mkdir -p dist/picturepin.koplugin
+          cp _meta.lua main.lua pannableimage.lua pinicon.lua pinnedimagepanel.lua dist/picturepin.koplugin/
+          cd dist
+          zip -r picturepin.koplugin.zip picturepin.koplugin
+
+      - name: Publish "latest" release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: latest
+          name: Latest build
+          body: Auto-built from ${{ github.sha }}. Extract so the `picturepin.koplugin` folder lands directly inside KoReader's `plugins/` directory.
+          artifacts: dist/picturepin.koplugin.zip
+          allowUpdates: true
+          removeArtifacts: true
+          makeLatest: true

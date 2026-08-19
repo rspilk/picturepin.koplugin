@@ -14,5 +14,7 @@ emulator, no core KoReader changes required.
 
 ## Install
 
-Copy this whole folder (`picturepin.koplugin/`) into KoReader's
-`plugins/` directory, then restart KoReader.
+Download [`picturepin.koplugin.zip`](../../releases/latest) from the
+latest release, or clone this repo. Either way, extract/copy the whole
+`picturepin.koplugin/` folder into KoReader's `plugins/` directory, then
+restart KoReader.
