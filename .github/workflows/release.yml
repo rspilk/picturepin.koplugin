@@ -49,18 +49,3 @@ jobs:
           allowUpdates: true
           removeArtifacts: true
           makeLatest: true
-
-      # Separate from the rolling "latest" release above: a permanent,
-      # never-overwritten release per version, so old builds stay
-      # available/pinnable and the Releases page shows real history
-      # instead of just one perpetually-updated entry.
-      - name: Publish versioned release
-        uses: ncipollo/release-action@v1
-        with:
-          tag: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
-          body: "PicturePin v${{ steps.version.outputs.version }}, auto-built from ${{ github.sha }}. Extract so the `picturepin.koplugin` folder lands directly inside KOReader's `plugins/` directory."
-          artifacts: dist/picturepin.koplugin.zip
-          allowUpdates: true
-          removeArtifacts: true
-          makeLatest: false
