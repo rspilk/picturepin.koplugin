@@ -1,0 +1,21 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI assistant session/config artifacts (not part of the plugin itself)
+.claude/
+.claude-*
+CLAUDE.local.md
+CLAUDE.md
+
+# Misc
+*.bak
+*.tmp
