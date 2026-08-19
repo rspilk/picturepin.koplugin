@@ -77,6 +77,9 @@ function PannableImage:init()
         Pinch = { GestureRange:new{ ges = "pinch", range = range } },
         Pan = { GestureRange:new{ ges = "pan", range = range } },
         PanRelease = { GestureRange:new{ ges = "pan_release", range = range } },
+        -- A fast/straight-enough release can get classified as a swipe
+        -- instead of pan_release -- see onSwipe below.
+        Swipe = { GestureRange:new{ ges = "swipe", range = range } },
     }
 end
 
@@ -129,10 +132,16 @@ function PannableImage:_applyNewScaleFactor(new_factor)
     new_factor = math.min(new_factor, self._max_scale_factor)
     new_factor = math.max(new_factor, self._min_scale_factor)
     if new_factor ~= self.scale_factor then
+        -- Passed to on_change so the caller can tell "might have exposed
+        -- a gap around a shrunk image" (needs a costlier full repaint)
+        -- apart from "only grew, nothing exposed" (cheap repaint is
+        -- enough) -- see pinnedimagepanel.lua's on_change for why that
+        -- distinction matters for keeping a live pinch responsive.
+        local shrinking = new_factor < self.scale_factor
         self.scale_factor = new_factor
         self:_buildImageWidget()
         if self.on_change then
-            self.on_change()
+            self.on_change(shrinking)
         end
     end
 end
@@ -207,6 +216,18 @@ function PannableImage:onPan(_, ges)
 end
 
 function PannableImage:onPanRelease()
+    if not self._panning then return false end
+    self._panning = false
+    self._pan_last_x, self._pan_last_y = nil, nil
+    return true
+end
+
+-- See pinnedimagepanel.lua's ResizeHandle:onSwipe for why this is
+-- needed -- without it, self._panning could get stuck true, corrupting
+-- the next drag on the image (e.g. a plain quick flick meant to move
+-- the panel would instead get misread as an image-pan continuation
+-- using stale coordinates).
+function PannableImage:onSwipe()
     if not self._panning then return false end
     self._panning = false
     self._pan_last_x, self._pan_last_y = nil, nil

@@ -54,6 +54,11 @@ function CloseButton:paintTo(bb, x, y)
     self.icon:paintTo(bb, x, y)
 end
 
+-- Shared tap-target size for the two corner drag handles (Close stays
+-- smaller -- it's a single tap, not something you have to land a drag
+-- start on).
+local HANDLE_ICON_SIZE = Screen:scaleBySize(36)
+
 -- ges.relative is cumulative since gesture start, so ges.pos - ges.relative
 -- is that gesture's origin point -- constant across every tick of a Pan,
 -- unlike ges.pos itself. Needed because "pan" (unlike "hold") fires under
@@ -77,17 +82,28 @@ end
 -- _buildMovableAt), PannableImage would otherwise win any pan
 -- originating here. It explicitly declines over this handle's own area
 -- (via exclude_widgets, set in _buildMovableAt, checked against the
--- gesture's origin -- see gestureOrigin above), and this handle's own
--- onPan checks its own on-screen area against that same origin point,
--- deciding once per gesture and remembering via self._resizing --
--- exactly mirroring MoveHandle's own tracking (self._resizing plays the
--- role of its self._moving).
+-- gesture's origin -- see gestureOrigin above).
+--
+-- Continuation state ("am I mid-resize") lives on `self.panel` (a
+-- required field, the owning PinnedImagePanel), NOT on this widget
+-- instance -- unlike MoveHandle's self._moving. _onResize rebuilds the
+-- *entire* subtree (PannableImage/CloseButton/ResizeHandle/MoveHandle/
+-- OverlapGroup/MovableContainer, see _buildMovableAt) on every live
+-- resize tick, to get the image re-rendered at the new size -- which
+-- means THIS VERY INSTANCE gets discarded and replaced partway through
+-- a single drag. A brand-new instance starting from self._resizing =
+-- false would re-run the origin-bounds check against its own (now
+-- moved, since the panel just resized) dimen and almost always fail,
+-- silently dropping the gesture after one tick. panel._resizing/
+-- panel._resize_last_x/y survive the rebuild because the panel itself
+-- is never recreated, only its children.
 local ResizeHandle = InputContainer:extend{
+    panel = nil, -- required
     callback = nil, -- called with (dw, dh) on every live drag tick
 }
 
 function ResizeHandle:init()
-    self.icon_size = Screen:scaleBySize(28)
+    self.icon_size = HANDLE_ICON_SIZE
     self.icon = IconWidget:new{
         icon = "control.expand",
         width = self.icon_size,
@@ -97,6 +113,10 @@ function ResizeHandle:init()
     self.ges_events = {
         Pan = { GestureRange:new{ ges = "pan", range = range } },
         PanRelease = { GestureRange:new{ ges = "pan_release", range = range } },
+        -- A fast/straight-enough release can get classified as a swipe
+        -- instead of pan_release -- see onSwipe below for why we need to
+        -- catch that too.
+        Swipe = { GestureRange:new{ ges = "swipe", range = range } },
     }
 end
 
@@ -110,31 +130,53 @@ function ResizeHandle:paintTo(bb, x, y)
 end
 
 function ResizeHandle:onPan(_, ges)
-    if not self._resizing then
+    local panel = self.panel
+    if not panel._resizing then
         if not (self.dimen and gestureOrigin(ges):intersectWith(self.dimen)) then
             return false
         end
-        self._resizing = true
-        self._last_x, self._last_y = ges.pos.x, ges.pos.y
+        panel._resizing = true
+        panel._resize_last_x, panel._resize_last_y = ges.pos.x, ges.pos.y
         return true
     end
     -- Applied immediately on every tick, not accumulated for onPanRelease,
     -- so the resize tracks the finger/cursor live during the drag.
-    local dx = ges.pos.x - self._last_x
-    local dy = ges.pos.y - self._last_y
+    local dx = ges.pos.x - panel._resize_last_x
+    local dy = ges.pos.y - panel._resize_last_y
     if (dx ~= 0 or dy ~= 0) and self.callback then
         self.callback(dx, dy)
-        self._last_x, self._last_y = ges.pos.x, ges.pos.y
+        panel._resize_last_x, panel._resize_last_y = ges.pos.x, ges.pos.y
     end
     return true
 end
 
 function ResizeHandle:onPanRelease()
-    if not self._resizing then
+    local panel = self.panel
+    if not panel._resizing then
         return false
     end
-    self._resizing = false
-    self._last_x, self._last_y = nil, nil
+    panel._resizing = false
+    panel._resize_last_x, panel._resize_last_y = nil, nil
+    return true
+end
+
+-- A quick, fairly straight-line release (letting go while still moving)
+-- gets classified by the gesture detector as a "swipe" instead of firing
+-- "pan_release" at all -- confirmed via emulator log during testing.
+-- Without this, panel._resizing would get stuck true forever, since
+-- nothing else would ever clear it, and the *next* unrelated touch
+-- landing on ResizeHandle would skip straight to the "continuation"
+-- branch of onPan using stale coordinates. Swipe's own pos field is the
+-- gesture's *start* point, not something useful for one final resize
+-- step, so just treat it as an implicit release rather than trying to
+-- apply it.
+function ResizeHandle:onSwipe()
+    local panel = self.panel
+    if not panel._resizing then
+        return false
+    end
+    panel._resizing = false
+    panel._resize_last_x, panel._resize_last_y = nil, nil
     return true
 end
 
@@ -154,13 +196,19 @@ end
 -- gesture-based move is disabled entirely (ignore_events, set in
 -- _buildMovableAt) -- this handle drives its position directly instead,
 -- live on every drag tick (see onPan/_onMove), not just once on release.
+--
+-- Unlike ResizeHandle, self._moving/self._last_x/y are safe to keep on
+-- this instance: _onMove only mutates the existing MovableContainer's
+-- offset in place (see PinnedImagePanel:_onMove), it never rebuilds the
+-- subtree, so this widget is never discarded mid-drag the way
+-- ResizeHandle's is.
 local MoveHandle = InputContainer:extend{
     icon_file = nil, -- required: absolute path to the bundled move icon
     callback = nil, -- called with (dx, dy) on every live drag tick
 }
 
 function MoveHandle:init()
-    self.icon_size = Screen:scaleBySize(28)
+    self.icon_size = HANDLE_ICON_SIZE
     self.icon = IconWidget:new{
         file = self.icon_file,
         width = self.icon_size,
@@ -170,6 +218,9 @@ function MoveHandle:init()
     self.ges_events = {
         Pan = { GestureRange:new{ ges = "pan", range = range } },
         PanRelease = { GestureRange:new{ ges = "pan_release", range = range } },
+        -- See ResizeHandle:onSwipe -- same fast-release-classified-as-
+        -- swipe gap applies here.
+        Swipe = { GestureRange:new{ ges = "swipe", range = range } },
     }
 end
 
@@ -197,6 +248,19 @@ function MoveHandle:onPan(_, ges)
         self.callback(dx, dy)
         self._last_x, self._last_y = ges.pos.x, ges.pos.y
     end
+    return true
+end
+
+-- See ResizeHandle:onSwipe for why this is needed -- without it,
+-- self._moving could get stuck true (this instance persists across many
+-- gestures, unlike ResizeHandle's), corrupting the next drag anywhere on
+-- this handle.
+function MoveHandle:onSwipe()
+    if not self._moving then
+        return false
+    end
+    self._moving = false
+    self._last_x, self._last_y = nil, nil
     return true
 end
 
@@ -289,21 +353,34 @@ function PinnedImagePanel:_buildMovableAt(panel_w, panel_h, moved_offset)
         image = self.image,
         width = panel_w,
         height = panel_h,
-        on_change = function()
+        on_change = function(shrinking)
             -- PannableImage's zoom-driven re-render swaps in a new inner
             -- widget, which needs an explicit repaint -- unlike panning,
             -- which schedules its own via ImageWidget's own
-            -- setDirty("all", ...). Zooming out shrinks the image inside
-            -- this same fixed-size panel box, so "all" is needed here
-            -- too (not just setDirty(panel, ...)): dirtying only the
-            -- panel repaints *it*, but not the reader page underneath,
-            -- leaving the newly-exposed gap around the smaller image as
-            -- a stale, unrefreshed ghost of whatever was there before --
-            -- same class of bug as the resize ghost fixed in _onResize,
-            -- just inside the panel's bounds instead of at its edge.
-            UIManager:setDirty("all", function()
-                return "ui", panel.movable.dimen
-            end)
+            -- setDirty("all", ...).
+            if shrinking then
+                -- Zooming out shrinks the image inside this same fixed-
+                -- size panel box, so "all" is needed here (not just
+                -- setDirty(panel, ...)): dirtying only the panel repaints
+                -- *it*, but not the reader page underneath, leaving the
+                -- newly-exposed gap around the smaller image as a stale,
+                -- unrefreshed ghost of whatever was there before -- same
+                -- class of bug as the resize ghost fixed in _onResize,
+                -- just inside the panel's bounds instead of at its edge.
+                UIManager:setDirty("all", function()
+                    return "ui", panel.movable.dimen
+                end)
+            else
+                -- Growing never exposes a gap (the image only ever fills
+                -- more of the same fixed box), so the cheaper
+                -- panel-only repaint is enough here -- important for
+                -- keeping a live pinch responsive, since this fires on
+                -- every single gesture tick and "all" forces a full
+                -- reader-page repaint underneath on top of our own,
+                -- repeatedly, which a fast real pinch can easily
+                -- outrun (ticks pile up and only resolve once released).
+                UIManager:setDirty(panel, "ui")
+            end
         end,
     }
 
@@ -314,7 +391,8 @@ function PinnedImagePanel:_buildMovableAt(panel_w, panel_h, moved_offset)
     }
 
     self.resize_handle = ResizeHandle:new{
-        overlap_offset = { panel_w - Screen:scaleBySize(28), panel_h - Screen:scaleBySize(28) },
+        panel = panel,
+        overlap_offset = { panel_w - HANDLE_ICON_SIZE, panel_h - HANDLE_ICON_SIZE },
         callback = function(dw, dh)
             panel:_onResize(dw, dh)
         end,

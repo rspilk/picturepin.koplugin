@@ -12,7 +12,7 @@ local Screen = Device.screen
 -- Bumped by hand on meaningful changes -- there's no build/CI-driven
 -- versioning here, just this one constant, shown in the pin confirm box
 -- and the main menu entry so a running install can be identified.
-local PICTUREPIN_VERSION = "0.6.0"
+local PICTUREPIN_VERSION = "0.7.0"
 
 local PicturePin = WidgetContainer:extend{
     name = "picturepin",
