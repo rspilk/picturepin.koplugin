@@ -11,10 +11,27 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Screen = Device.screen
 
+-- Extra invisible margin around each corner icon's *hit box* (not its
+-- drawn size) -- landing a tap/drag-start exactly within a ~36px corner
+-- icon is easy to miss by a few pixels, whether by finger or mouse.
+-- A near-miss isn't harmless here: once zoomed in, PannableImage
+-- eagerly claims any Pan gesture that doesn't land on an excluded
+-- widget (see its own onPan), so a near-miss on e.g. MoveHandle doesn't
+-- just fail silently -- it actively pans the image instead of moving
+-- the panel, which is what this padding is for.
+local HANDLE_HIT_PADDING = Screen:scaleBySize(14)
+
+local function paddedDimen(x, y, w, h)
+    return Geom:new{
+        x = x - HANDLE_HIT_PADDING, y = y - HANDLE_HIT_PADDING,
+        w = w + 2 * HANDLE_HIT_PADDING, h = h + 2 * HANDLE_HIT_PADDING,
+    }
+end
+
 -- Small always-visible close affordance, positioned in the panel's
 -- top-right corner via OverlapGroup. Registers its own "tap" ges_events
 -- (full-screen range, like other leaf widgets do), but only acts if the
--- tap actually lands within its own current on-screen area (self.dimen,
+-- tap actually lands within its own current on-screen area (self.hit_dimen,
 -- updated on every paintTo) -- needed since the whole panel can be
 -- dragged elsewhere.
 local CloseButton = InputContainer:extend{
@@ -40,7 +57,7 @@ function CloseButton:getSize()
 end
 
 function CloseButton:onTap(_, ges)
-    if self.dimen and ges.pos:intersectWith(self.dimen) then
+    if self.hit_dimen and ges.pos:intersectWith(self.hit_dimen) then
         if self.callback then
             self.callback()
         end
@@ -51,6 +68,7 @@ end
 
 function CloseButton:paintTo(bb, x, y)
     self.dimen = Geom:new{ x = x, y = y, w = self.icon_size, h = self.icon_size }
+    self.hit_dimen = paddedDimen(x, y, self.icon_size, self.icon_size)
     self.icon:paintTo(bb, x, y)
 end
 
@@ -126,13 +144,14 @@ end
 
 function ResizeHandle:paintTo(bb, x, y)
     self.dimen = Geom:new{ x = x, y = y, w = self.icon_size, h = self.icon_size }
+    self.hit_dimen = paddedDimen(x, y, self.icon_size, self.icon_size)
     self.icon:paintTo(bb, x, y)
 end
 
 function ResizeHandle:onPan(_, ges)
     local panel = self.panel
     if not panel._resizing then
-        if not (self.dimen and gestureOrigin(ges):intersectWith(self.dimen)) then
+        if not (self.hit_dimen and gestureOrigin(ges):intersectWith(self.hit_dimen)) then
             return false
         end
         panel._resizing = true
@@ -230,12 +249,13 @@ end
 
 function MoveHandle:paintTo(bb, x, y)
     self.dimen = Geom:new{ x = x, y = y, w = self.icon_size, h = self.icon_size }
+    self.hit_dimen = paddedDimen(x, y, self.icon_size, self.icon_size)
     self.icon:paintTo(bb, x, y)
 end
 
 function MoveHandle:onPan(_, ges)
     if not self._moving then
-        if not (self.dimen and gestureOrigin(ges):intersectWith(self.dimen)) then
+        if not (self.hit_dimen and gestureOrigin(ges):intersectWith(self.hit_dimen)) then
             return false
         end
         self._moving = true
@@ -296,8 +316,11 @@ MovableContainer assumes its content doesn't change size while active
 tick (live, not just once on release), rather than resizing anything in
 place -- see _buildMovableAt() and _onResize(). Rebuilding on every tick
 re-decodes/rescales the image each time, so a live resize is more work
-per frame than a live move or pan; worth watching for lag on slower
-hardware.
+per frame than a live move or pan -- and if the image is zoomed in past
+fit when a resize starts, that rebuild drops it back to fit for the
+whole resize (see _buildMovableAt's own comment): repeatedly
+re-rendering an above-fit bitmap on every tick of a fast real drag was
+enough to crash the process during testing, not just cause lag.
 Aspect ratio is preserved (matching the initial image-fit sizing done
 in init()), and the panel's on-screen top-left corner is kept fixed
 across a resize (it grows/shrinks toward the bottom-right, where the
@@ -306,7 +329,47 @@ _moved_offset_x/y rather than relying on its own anchor mechanism
 (which is designed for "pop up near this other widget", not "keep this
 exact pixel position").
 ]]--
-local PinnedImagePanel = WidgetContainer:extend{}
+local PinnedImagePanel = WidgetContainer:extend{
+    -- Optional: {scale_factor, center_x_ratio, center_y_ratio} from a
+    -- previous time this same pinned image was opened (see PicturePin's
+    -- pinned_zoom/on_close wiring in main.lua) -- restores zoom/pan
+    -- position instead of always reopening at fit-to-box, centered.
+    initial_zoom = nil,
+    -- Optional: called with the same shape as initial_zoom when this
+    -- panel closes, so the caller can remember it for next time.
+    on_close = nil,
+}
+
+-- Normalizes either a live PannableImage instance (whose pan-ratio
+-- fields are underscore-prefixed internals, see pannableimage.lua) or a
+-- plain saved-zoom table (initial_zoom/on_close's shape) into the same
+-- shape, so callers don't need to care which one they were handed.
+-- width/height are the box the scale_factor was computed against --
+-- needed to correctly rescale it if reapplied to a *different* box size
+-- later (live resize, or reopening at a different default box size,
+-- since panel geometry itself isn't persisted) -- see the comment in
+-- _buildMovableAt on why reapplying it unadjusted is dangerous.
+local function zoomStateOf(source)
+    if not source then return nil end
+    return {
+        scale_factor = source.scale_factor,
+        center_x_ratio = source.center_x_ratio or source._center_x_ratio,
+        center_y_ratio = source.center_y_ratio or source._center_y_ratio,
+        width = source.width,
+        height = source.height,
+    }
+end
+
+-- Fit-to-box scale factor for a given image size within a given box --
+-- the same formula ImageWidget itself uses internally when scale_factor
+-- == 0 (frontend/ui/widget/imagewidget.lua), computed independently
+-- here so it's available before any ImageWidget exists for the new box.
+local function fitScale(img_w, img_h, box_w, box_h)
+    if not (img_w and img_h and img_w > 0 and img_h > 0 and box_w and box_h) then
+        return nil
+    end
+    return math.min(box_w / img_w, box_h / img_h)
+end
 
 local MIN_PANEL_W = Screen:scaleBySize(150)
 local MIN_PANEL_H = Screen:scaleBySize(150)
@@ -329,6 +392,9 @@ function PinnedImagePanel:init()
             local scale = math.min(max_w / img_w, max_h / img_h)
             panel_w = math.floor(img_w * scale)
             panel_h = math.floor(img_h * scale)
+            -- Cached for _buildMovableAt's fitScale calls (rescaling a
+            -- carried-over zoom level for whatever box size is current).
+            self._img_w, self._img_h = img_w, img_h
         end
     end
     self._aspect_ratio = panel_w / panel_h
@@ -349,10 +415,64 @@ end
 function PinnedImagePanel:_buildMovableAt(panel_w, panel_h, moved_offset)
     local panel = self
 
+    -- Only seed zoom/pan from initial_zoom on this panel's very first
+    -- build (state saved from a previous time this pinned image was
+    -- opened -- see PicturePin's on_close in main.lua). A resize-
+    -- triggered rebuild (self.pannable_image already exists) deliberately
+    -- does NOT carry the current zoom forward -- see the safety comment
+    -- below on why.
+    local carry_over = not self.pannable_image and zoomStateOf(self.initial_zoom) or nil
+    self.initial_zoom = nil -- consumed -- a later resize rebuild must not reapply it
+
+    -- carry_over.scale_factor is an *absolute* ratio against the image's
+    -- native resolution (frontend/ui/widget/imagewidget.lua) -- entirely
+    -- independent of box size. Reapplying it unadjusted against a
+    -- *different* box size (reopening at a different default box size,
+    -- since panel geometry itself isn't persisted) can ask for a render
+    -- larger than intended -- so rescale it relative to fit instead:
+    -- preserve *how many times past fit-to-box* the user had zoomed, and
+    -- reapply that ratio against fit for *this* box.
+    local scale_factor = 0
+    if carry_over and carry_over.scale_factor and carry_over.scale_factor > 0
+            and self._img_w and carry_over.width and carry_over.height then
+        local old_fit = fitScale(self._img_w, self._img_h, carry_over.width, carry_over.height)
+        local new_fit = fitScale(self._img_w, self._img_h, panel_w, panel_h)
+        if old_fit and old_fit > 0 and new_fit then
+            scale_factor = carry_over.scale_factor / old_fit * new_fit
+        end
+    end
+    -- NOTE: resizing while zoomed in is deliberately NOT preserved --
+    -- every live resize tick rebuilds this whole subtree (see below), so
+    -- carrying a more-than-fit scale_factor forward across *that* means
+    -- repeatedly re-rendering an above-fit bitmap dozens of times a
+    -- second during a real drag. That crashed the whole emulator VM
+    -- twice while iterating on this, even after this same relative-zoom
+    -- math bounded the render to a *sane* size for the box -- the sheer
+    -- rate of repeated above-fit re-renders during a fast drag was still
+    -- enough to bring it down. Resizing always renders at fit from here
+    -- on; re-zoom afterward if wanted. Zoom/pan across a close-then-
+    -- reopen (the actual, lower-frequency motivating use case) is still
+    -- fully preserved.
+
+    -- The old instance is just overwritten below, not closed via
+    -- UIManager:close(), so nothing would otherwise ever call its
+    -- onCloseWidget -- which is what frees its underlying native bitmap
+    -- buffer (_image_wg). Lua's GC reclaims the small Lua-side wrapper
+    -- table eventually, but *not* that FFI-allocated buffer, which needs
+    -- this explicit free. A live resize rebuilds on every single drag
+    -- tick, so without this, a real multi-tick resize drag leaks one
+    -- bitmap allocation per tick.
+    if self.pannable_image then
+        self.pannable_image:onCloseWidget()
+    end
+
     self.pannable_image = PannableImage:new{
         image = self.image,
         width = panel_w,
         height = panel_h,
+        scale_factor = scale_factor,
+        center_x_ratio = carry_over and carry_over.center_x_ratio,
+        center_y_ratio = carry_over and carry_over.center_y_ratio,
         on_change = function(shrinking)
             -- PannableImage's zoom-driven re-render swaps in a new inner
             -- widget, which needs an explicit repaint -- unlike panning,
@@ -501,6 +621,19 @@ function PinnedImagePanel:_onMove(dx, dy)
         end
         return "ui", update_region
     end)
+end
+
+-- Reports the final zoom/pan state back to the caller (see on_close) so
+-- it can be restored (see initial_zoom) the next time this same pinned
+-- image is opened. Fires after CloseWidget has already cascaded down to
+-- self.pannable_image's own onCloseWidget (frees its bitmap widget --
+-- children are tried before their container, same as gesture dispatch),
+-- but that only frees the *image* resource, not the plain scale_factor/
+-- center_ratio number fields read here, so this is still safe.
+function PinnedImagePanel:onCloseWidget()
+    if self.on_close then
+        self.on_close(zoomStateOf(self.pannable_image))
+    end
 end
 
 return PinnedImagePanel

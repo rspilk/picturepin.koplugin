@@ -58,6 +58,8 @@ local PannableImage = InputContainer:extend{
     width = nil,  -- fixed footprint size; our parent positions us
     height = nil,
     scale_factor = 0, -- 0 = fit to footprint
+    center_x_ratio = nil, -- optional: restore a previous pan position (defaults to 0.5, centered)
+    center_y_ratio = nil,
     on_change = nil, -- optional: called after a zoom-driven re-render
     -- Sibling widgets (e.g. the panel's Close/Resize/Move corner icons)
     -- that should keep first refusal on Pan gestures *originating* on
@@ -67,8 +69,13 @@ local PannableImage = InputContainer:extend{
 }
 
 function PannableImage:init()
-    self._center_x_ratio = 0.5
-    self._center_y_ratio = 0.5
+    -- self.center_x_ratio/y (no underscore) are the optional constructor
+    -- override; self._center_x_ratio/y (underscored) are our own live,
+    -- continuously-updated state from here on -- keeping both named
+    -- fields distinct avoids overwriting a restored value the moment
+    -- init() runs.
+    self._center_x_ratio = self.center_x_ratio or 0.5
+    self._center_y_ratio = self.center_y_ratio or 0.5
     self:_buildImageWidget()
 
     local range = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
@@ -88,7 +95,12 @@ function PannableImage:_isExcluded(pos)
         return false
     end
     for _, w in ipairs(self.exclude_widgets) do
-        if w.dimen and pos:intersectWith(w.dimen) then
+        -- Prefer each widget's own padded hit_dimen (see pinnedimagepanel.lua's
+        -- HANDLE_HIT_PADDING) over its plain drawn dimen, if it has one --
+        -- a drag that starts just outside a corner icon's exact pixels
+        -- should still be excluded, not eagerly claimed here instead.
+        local hit_area = w.hit_dimen or w.dimen
+        if hit_area and pos:intersectWith(hit_area) then
             return true
         end
     end

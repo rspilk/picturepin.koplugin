@@ -12,7 +12,7 @@ local Screen = Device.screen
 -- Bumped by hand on meaningful changes -- there's no build/CI-driven
 -- versioning here, just this one constant, shown in the pin confirm box
 -- and the main menu entry so a running install can be identified.
-local PICTUREPIN_VERSION = "0.7.0"
+local PICTUREPIN_VERSION = "0.8.0"
 
 local PicturePin = WidgetContainer:extend{
     name = "picturepin",
@@ -78,6 +78,10 @@ function PicturePin:onReaderReady()
     -- re-derived lazily on first tap, see onTapPinIcon/_refetchPinnedImage).
     self.pinned_image = self.ui.doc_settings:readSetting("picturepin_pinned_image")
     self.icon.visible = self.pinned_image ~= nil
+    -- {scale_factor, center_x_ratio, center_y_ratio} from the last time
+    -- the panel was closed, if any -- restored so reopening a map you'd
+    -- zoomed into doesn't reset back to fit-to-box every time.
+    self.pinned_zoom = self.ui.doc_settings:readSetting("picturepin_zoom")
 end
 
 -- Holding on an image shows it in the stock, unmodified fullscreen
@@ -150,6 +154,10 @@ function PicturePin:pinImage(pos, image)
         xpointer = self.ui.document:getXPointer(),
     }
     self.ui.doc_settings:saveSetting("picturepin_pinned_image", self.pinned_image)
+    -- A new pin replaces the old image entirely -- its zoom/pan state
+    -- wouldn't mean anything applied to a different picture.
+    self.pinned_zoom = nil
+    self.ui.doc_settings:delSetting("picturepin_zoom")
     self.icon.visible = true
 
     UIManager:show(InfoMessage:new{
@@ -161,6 +169,9 @@ end
 function PicturePin:onSaveSettings()
     if self.pinned_image then
         self.ui.doc_settings:saveSetting("picturepin_pinned_image", self.pinned_image)
+    end
+    if self.pinned_zoom then
+        self.ui.doc_settings:saveSetting("picturepin_zoom", self.pinned_zoom)
     end
 end
 
@@ -185,9 +196,17 @@ function PicturePin:onTapPinIcon()
         })
         return true
     end
+    local plugin = self
     UIManager:show(PinnedImagePanel:new{
         image = self.pinned_image_bb,
         plugin_path = self.path,
+        initial_zoom = self.pinned_zoom,
+        on_close = function(zoom)
+            plugin.pinned_zoom = zoom
+            if zoom then
+                plugin.ui.doc_settings:saveSetting("picturepin_zoom", zoom)
+            end
+        end,
     })
     return true
 end
