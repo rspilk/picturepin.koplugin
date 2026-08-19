@@ -27,7 +27,7 @@ jobs:
         with:
           tag: latest
           name: Latest build
-          body: Auto-built from ${{ github.sha }}. Extract so the `picturepin.koplugin` folder lands directly inside KoReader's `plugins/` directory.
+          body: Auto-built from ${{ github.sha }}. Extract so the `picturepin.koplugin` folder lands directly inside KOReader's `plugins/` directory.
           artifacts: dist/picturepin.koplugin.zip
           allowUpdates: true
           removeArtifacts: true
