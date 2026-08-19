@@ -57,11 +57,14 @@ end
 -- Small always-visible resize handle, bottom-right corner (via
 -- overlap_offset, since OverlapGroup's overlap_align only directly
 -- supports horizontal left/right/center). Claims the same raw Hold/
--- HoldPan/HoldRelease gesture types MovableContainer wants for its own
--- drag-to-reposition -- since children are tried before their container
--- (confirmed empirically while fixing the panel's own drag earlier),
--- this would win that tie for *any* hold on the panel, not just on the
--- handle itself, unless it explicitly declines: onHold checks its own
+-- HoldPan/HoldRelease gesture types both MovableContainer (panel move,
+-- when not zoomed) and PannableImage (image pan, when zoomed) want --
+-- since children are tried before their container (confirmed empirically
+-- while fixing the panel's own drag earlier), and PannableImage is tried
+-- before this handle (array order in _buildMovableAt), either of those
+-- would otherwise win any hold landing here. Both explicitly decline
+-- over this handle's own area (PannableImage via exclude_widgets, set in
+-- _buildMovableAt), and this handle's own onHold checks its own
 -- on-screen area and returns false if the hold didn't start there,
 -- exactly mirroring MovableContainer's own "did this sequence start
 -- inside me" tracking (self._resizing plays the role of its
@@ -132,6 +135,15 @@ always-visible Close (top-right) and resize-handle (bottom-right)
 buttons, stacked via OverlapGroup, inside a MovableContainer, so the
 whole thing can be dragged around on top of the current page without
 navigating away from the reading position.
+
+Gesture split between panning the image and moving the whole panel:
+PannableImage claims Hold+HoldPan+HoldRelease (dwell, then drag) to pan
+the image once zoomed in, declining when not zoomed (see its own
+onHold) or over the Close/Resize icons (see exclude_widgets below) --
+leaving MovableContainer's own Pan/Swipe-based move (a quick flick, no
+dwell) as how the panel gets repositioned. See pannableimage.lua's own
+comment for why this is the reverse of the more obvious Pan-for-content/
+Hold-for-container split.
 
 MovableContainer assumes its content doesn't change size while active
 (its own doc comment), so resizing rebuilds the content (PannableImage
@@ -221,6 +233,11 @@ function PinnedImagePanel:_buildMovableAt(panel_w, panel_h, moved_offset)
         self.close_button,
         self.resize_handle,
     }
+
+    -- Let PannableImage decline Hold-family gestures landing on these
+    -- corner icons -- it's tried first in dispatch order (array index 1
+    -- above) but doesn't know its siblings' bounds on its own.
+    self.pannable_image.exclude_widgets = { self.close_button, self.resize_handle }
 
     self.movable = MovableContainer:new{
         self.overlap,

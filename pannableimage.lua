@@ -20,6 +20,21 @@ which computes the zoom-center relative to *this widget's own* current
 on-screen position, since imageviewer.lua's version assumes it's
 always centered on the full screen.
 
+Panning claims Hold/HoldPan/HoldRelease rather than plain Pan/
+PanRelease (unlike imageviewer.lua, and unlike an earlier version of
+this widget). This is deliberate: our parent panel sits inside a
+MovableContainer, which moves the whole panel on a drag, and KOReader's
+gesture detector only tells "quick flick" (Pan) apart from "pause, then
+drag" (Hold+HoldPan) by a ~500ms dwell time -- in practice almost any
+real drag, mouse or finger, has enough dwell to land in the Hold
+bucket, so claiming plain Pan here left MovableContainer's competing
+Hold-based move winning by default on most drags. Claiming Hold instead
+makes "dwell, then drag" pan the image (the common case), and leaves
+MovableContainer's Pan/Swipe-based move (a genuine quick flick, no
+dwell) as the way to reposition the panel instead. See onHold for the
+one exception (declines when not zoomed in, so a hold-drag still falls
+through to MovableContainer's move when there's nothing to pan).
+
 Actual image decoding/scaling/panning is delegated to ImageWidget
 (ui/widget/imagewidget.lua), a generic widget with no fullscreen
 assumptions of its own -- reused here as-is, not reimplemented.
@@ -38,6 +53,10 @@ local PannableImage = InputContainer:extend{
     height = nil,
     scale_factor = 0, -- 0 = fit to footprint
     on_change = nil, -- optional: called after a zoom-driven re-render
+    -- Sibling widgets (e.g. the panel's Close/Resize corner icons) that
+    -- should keep first refusal on Hold-family gestures landing on them,
+    -- even though we're tried first in dispatch order (see pinnedimagepanel.lua).
+    exclude_widgets = nil,
 }
 
 function PannableImage:init()
@@ -49,9 +68,22 @@ function PannableImage:init()
     self.ges_events = {
         Spread = { GestureRange:new{ ges = "spread", range = range } },
         Pinch = { GestureRange:new{ ges = "pinch", range = range } },
-        Pan = { GestureRange:new{ ges = "pan", range = range } },
-        PanRelease = { GestureRange:new{ ges = "pan_release", range = range } },
+        Hold = { GestureRange:new{ ges = "hold", range = range } },
+        HoldPan = { GestureRange:new{ ges = "hold_pan", range = range } },
+        HoldRelease = { GestureRange:new{ ges = "hold_release", range = range } },
     }
+end
+
+function PannableImage:_isExcluded(pos)
+    if not self.exclude_widgets then
+        return false
+    end
+    for _, w in ipairs(self.exclude_widgets) do
+        if w.dimen and pos:intersectWith(w.dimen) then
+            return true
+        end
+    end
+    return false
 end
 
 function PannableImage:_buildImageWidget()
@@ -76,6 +108,10 @@ end
 function PannableImage:_refreshScaleFactor()
     if self.scale_factor == 0 then
         self.scale_factor = self._image_wg:getScaleFactor()
+        -- Baseline "fit to footprint" factor, kept even as self.scale_factor
+        -- changes with zoom -- lets onHold tell "not zoomed, nothing to pan"
+        -- apart from "zoomed in, holding here should pan".
+        self._fit_scale_factor = self.scale_factor
     end
 end
 
@@ -127,18 +163,38 @@ function PannableImage:onPinch(_, ges)
     return true
 end
 
-function PannableImage:onPan(_, ges)
+function PannableImage:onHold(_, ges)
+    if not self._image_wg then return false end
+    if self:_isExcluded(ges.pos) then return false end
+    self:_refreshScaleFactor()
+    if self.scale_factor <= self._fit_scale_factor then
+        -- Not zoomed in -- nothing to pan, so decline and let this
+        -- hold-drag fall through to MovableContainer's own move instead.
+        return false
+    end
     self._panning = true
-    self._pan_relative_x = ges.relative.x
-    self._pan_relative_y = ges.relative.y
+    self._pan_last_x, self._pan_last_y = ges.pos.x, ges.pos.y
     return true
 end
 
-function PannableImage:onPanRelease()
-    if self._panning and self._image_wg then
-        self._panning = false
-        self._image_wg:panBy(-self._pan_relative_x, -self._pan_relative_y)
+-- Applied immediately on every tick, not accumulated for onHoldRelease,
+-- so the image tracks the finger/cursor live during the drag (unlike
+-- MovableContainer's own panel-move, which only applies on release).
+function PannableImage:onHoldPan(_, ges)
+    if not self._panning or not self._image_wg then return false end
+    local dx = ges.pos.x - self._pan_last_x
+    local dy = ges.pos.y - self._pan_last_y
+    if dx ~= 0 or dy ~= 0 then
+        self._image_wg:panBy(-dx, -dy)
+        self._pan_last_x, self._pan_last_y = ges.pos.x, ges.pos.y
     end
+    return true
+end
+
+function PannableImage:onHoldRelease()
+    if not self._panning then return false end
+    self._panning = false
+    self._pan_last_x, self._pan_last_y = nil, nil
     return true
 end
 
