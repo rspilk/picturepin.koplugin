@@ -75,7 +75,7 @@ function PicturePin:onReaderReady()
 end
 
 -- Holding on an image shows it in the stock, unmodified fullscreen
--- ImageViewer (same as vanilla KoReader) -- we don't touch
+-- ImageViewer (same as vanilla KOReader) -- we don't touch
 -- readerhighlight.lua at all; this is our own hold zone, tried before
 -- readerhighlight's, falling through (return false) for anything that
 -- isn't an image so normal text-selection-by-hold is unaffected.
