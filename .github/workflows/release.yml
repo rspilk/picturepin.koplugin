@@ -29,6 +29,16 @@ jobs:
           cd dist
           zip -r picturepin.koplugin.zip picturepin.koplugin
 
+      # ncipollo/release-action's "commit" input only tags a *new* tag --
+      # since "latest" already exists from the very first run, every
+      # later run was updating the release's body/assets in place but
+      # never actually moving the tag itself, leaving it pointing at
+      # whatever commit first created it. Force it to this commit first.
+      - name: Move "latest" tag to this commit
+        run: |
+          git tag -f latest
+          git push origin -f latest
+
       - name: Publish "latest" release
         uses: ncipollo/release-action@v1
         with:
