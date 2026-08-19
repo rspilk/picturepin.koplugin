@@ -9,6 +9,11 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 local Screen = Device.screen
 
+-- Bumped by hand on meaningful changes -- there's no build/CI-driven
+-- versioning here, just this one constant, shown in the pin confirm box
+-- and the main menu entry so a running install can be identified.
+local PICTUREPIN_VERSION = "0.6.0"
+
 local PicturePin = WidgetContainer:extend{
     name = "picturepin",
     is_doc_only = true,
@@ -59,9 +64,10 @@ function PicturePin:addToMainMenu(menu_items)
         text = _("PicturePin"),
         sorting_hint = "more_tools",
         callback = function()
+            local status = self.pinned_image and _("An image is currently pinned.")
+                or _("No image is currently pinned. Hold an image to pin it.")
             UIManager:show(InfoMessage:new{
-                text = self.pinned_image and _("An image is currently pinned.")
-                    or _("No image is currently pinned. Hold an image to pin it."),
+                text = status .. "\n\nPicturePin " .. PICTUREPIN_VERSION,
             })
         end,
     }
@@ -112,7 +118,8 @@ end
 
 function PicturePin:promptToPin(pos, image)
     UIManager:show(ConfirmBox:new{
-        text = _("Pin this image? A small icon will stay on screen while reading this book, to reopen it without losing your place."),
+        text = _("Pin this image? A small icon will stay on screen while reading this book, to reopen it without losing your place.")
+            .. "\n\nPicturePin " .. PICTUREPIN_VERSION,
         ok_text = _("Pin"),
         ok_callback = function()
             self:pinImage(pos, image)
@@ -180,6 +187,7 @@ function PicturePin:onTapPinIcon()
     end
     UIManager:show(PinnedImagePanel:new{
         image = self.pinned_image_bb,
+        plugin_path = self.path,
     })
     return true
 end

@@ -54,23 +54,36 @@ function CloseButton:paintTo(bb, x, y)
     self.icon:paintTo(bb, x, y)
 end
 
+-- ges.relative is cumulative since gesture start, so ges.pos - ges.relative
+-- is that gesture's origin point -- constant across every tick of a Pan,
+-- unlike ges.pos itself. Needed because "pan" (unlike "hold") fires under
+-- the same event name on every tick, including the first -- see
+-- MoveHandle's own comment for the full explanation.
+local function gestureOrigin(ges)
+    return Geom:new{
+        x = ges.pos.x - ges.relative.x,
+        y = ges.pos.y - ges.relative.y,
+        w = 0, h = 0,
+    }
+end
+
 -- Small always-visible resize handle, bottom-right corner (via
 -- overlap_offset, since OverlapGroup's overlap_align only directly
--- supports horizontal left/right/center). Claims the same raw Hold/
--- HoldPan/HoldRelease gesture types both MovableContainer (panel move,
--- when not zoomed) and PannableImage (image pan, when zoomed) want --
--- since children are tried before their container (confirmed empirically
--- while fixing the panel's own drag earlier), and PannableImage is tried
--- before this handle (array order in _buildMovableAt), either of those
--- would otherwise win any hold landing here. Both explicitly decline
--- over this handle's own area (PannableImage via exclude_widgets, set in
--- _buildMovableAt), and this handle's own onHold checks its own
--- on-screen area and returns false if the hold didn't start there,
--- exactly mirroring MovableContainer's own "did this sequence start
--- inside me" tracking (self._resizing plays the role of its
--- self._moving).
+-- supports horizontal left/right/center). Claims Pan/PanRelease, the
+-- same raw gesture type PannableImage wants for image panning when
+-- zoomed in -- since children are tried before their container
+-- (confirmed empirically while fixing the panel's own drag earlier),
+-- and PannableImage is tried before this handle (array order in
+-- _buildMovableAt), PannableImage would otherwise win any pan
+-- originating here. It explicitly declines over this handle's own area
+-- (via exclude_widgets, set in _buildMovableAt, checked against the
+-- gesture's origin -- see gestureOrigin above), and this handle's own
+-- onPan checks its own on-screen area against that same origin point,
+-- deciding once per gesture and remembering via self._resizing --
+-- exactly mirroring MoveHandle's own tracking (self._resizing plays the
+-- role of its self._moving).
 local ResizeHandle = InputContainer:extend{
-    callback = nil, -- called with (dw, dh) once the resize gesture completes
+    callback = nil, -- called with (dw, dh) on every live drag tick
 }
 
 function ResizeHandle:init()
@@ -82,9 +95,8 @@ function ResizeHandle:init()
     }
     local range = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
     self.ges_events = {
-        Hold = { GestureRange:new{ ges = "hold", range = range } },
-        HoldPan = { GestureRange:new{ ges = "hold_pan", range = range } },
-        HoldRelease = { GestureRange:new{ ges = "hold_release", range = range } },
+        Pan = { GestureRange:new{ ges = "pan", range = range } },
+        PanRelease = { GestureRange:new{ ges = "pan_release", range = range } },
     }
 end
 
@@ -97,33 +109,103 @@ function ResizeHandle:paintTo(bb, x, y)
     self.icon:paintTo(bb, x, y)
 end
 
-function ResizeHandle:onHold(_, ges)
-    if self.dimen and ges.pos:intersectWith(self.dimen) then
+function ResizeHandle:onPan(_, ges)
+    if not self._resizing then
+        if not (self.dimen and gestureOrigin(ges):intersectWith(self.dimen)) then
+            return false
+        end
         self._resizing = true
-        self._start_x, self._start_y = ges.pos.x, ges.pos.y
         self._last_x, self._last_y = ges.pos.x, ges.pos.y
         return true
     end
-    return false
-end
-
-function ResizeHandle:onHoldPan(_, ges)
-    if not self._resizing then
-        return false
+    -- Applied immediately on every tick, not accumulated for onPanRelease,
+    -- so the resize tracks the finger/cursor live during the drag.
+    local dx = ges.pos.x - self._last_x
+    local dy = ges.pos.y - self._last_y
+    if (dx ~= 0 or dy ~= 0) and self.callback then
+        self.callback(dx, dy)
+        self._last_x, self._last_y = ges.pos.x, ges.pos.y
     end
-    self._last_x, self._last_y = ges.pos.x, ges.pos.y
     return true
 end
 
-function ResizeHandle:onHoldRelease()
+function ResizeHandle:onPanRelease()
     if not self._resizing then
         return false
     end
     self._resizing = false
-    if self.callback and self._last_x then
-        self.callback(self._last_x - self._start_x, self._last_y - self._start_y)
+    self._last_x, self._last_y = nil, nil
+    return true
+end
+
+-- Small always-visible move handle, top-left corner (OverlapGroup's
+-- default alignment -- no overlap_offset needed, unlike the other two
+-- corners). Dedicated hit target for repositioning the whole panel,
+-- replacing an earlier Hold-vs-quick-Pan gesture split between
+-- PannableImage and MovableContainer: almost any real drag (mouse or
+-- finger) has enough dwell to register as Hold rather than a bare Pan,
+-- so "hold anywhere on the image and drag" never reliably meant "move
+-- the panel" in the first place. Now that moving and resizing each have
+-- their own dedicated corner, all three (this, ResizeHandle,
+-- PannableImage) claim plain Pan/PanRelease instead, so there's no
+-- dwell delay before a drag takes effect -- see pannableimage.lua's own
+-- comment for why Pan needs the origin-based (not live-position-based)
+-- ownership check below, unlike Hold. MovableContainer's own
+-- gesture-based move is disabled entirely (ignore_events, set in
+-- _buildMovableAt) -- this handle drives its position directly instead,
+-- live on every drag tick (see onPan/_onMove), not just once on release.
+local MoveHandle = InputContainer:extend{
+    icon_file = nil, -- required: absolute path to the bundled move icon
+    callback = nil, -- called with (dx, dy) on every live drag tick
+}
+
+function MoveHandle:init()
+    self.icon_size = Screen:scaleBySize(28)
+    self.icon = IconWidget:new{
+        file = self.icon_file,
+        width = self.icon_size,
+        height = self.icon_size,
+    }
+    local range = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+    self.ges_events = {
+        Pan = { GestureRange:new{ ges = "pan", range = range } },
+        PanRelease = { GestureRange:new{ ges = "pan_release", range = range } },
+    }
+end
+
+function MoveHandle:getSize()
+    return Geom:new{ w = self.icon_size, h = self.icon_size }
+end
+
+function MoveHandle:paintTo(bb, x, y)
+    self.dimen = Geom:new{ x = x, y = y, w = self.icon_size, h = self.icon_size }
+    self.icon:paintTo(bb, x, y)
+end
+
+function MoveHandle:onPan(_, ges)
+    if not self._moving then
+        if not (self.dimen and gestureOrigin(ges):intersectWith(self.dimen)) then
+            return false
+        end
+        self._moving = true
+        self._last_x, self._last_y = ges.pos.x, ges.pos.y
+        return true
     end
-    self._start_x, self._start_y, self._last_x, self._last_y = nil, nil, nil, nil
+    local dx = ges.pos.x - self._last_x
+    local dy = ges.pos.y - self._last_y
+    if (dx ~= 0 or dy ~= 0) and self.callback then
+        self.callback(dx, dy)
+        self._last_x, self._last_y = ges.pos.x, ges.pos.y
+    end
+    return true
+end
+
+function MoveHandle:onPanRelease()
+    if not self._moving then
+        return false
+    end
+    self._moving = false
+    self._last_x, self._last_y = nil, nil
     return true
 end
 
@@ -132,24 +214,26 @@ Movable, zoomable, resizable overlay for the pinned image. Wraps a
 PannableImage (our own lightweight zoom/pan widget -- see
 pannableimage.lua for why this doesn't reuse ImageViewer) plus small
 always-visible Close (top-right) and resize-handle (bottom-right)
-buttons, stacked via OverlapGroup, inside a MovableContainer, so the
-whole thing can be dragged around on top of the current page without
-navigating away from the reading position.
+buttons plus a Move handle (top-left), stacked via OverlapGroup, inside
+a MovableContainer, so the whole thing can be dragged around on top of
+the current page without navigating away from the reading position.
 
-Gesture split between panning the image and moving the whole panel:
-PannableImage claims Hold+HoldPan+HoldRelease (dwell, then drag) to pan
-the image once zoomed in, declining when not zoomed (see its own
-onHold) or over the Close/Resize icons (see exclude_widgets below) --
-leaving MovableContainer's own Pan/Swipe-based move (a quick flick, no
-dwell) as how the panel gets repositioned. See pannableimage.lua's own
-comment for why this is the reverse of the more obvious Pan-for-content/
-Hold-for-container split.
+Panning the image (PannableImage, once zoomed in) and moving the panel
+(MoveHandle) are deliberately separate hit targets, not a gesture-type
+split on the same area -- see MoveHandle's own comment for why an
+earlier Hold-vs-quick-Pan split between PannableImage and
+MovableContainer didn't hold up. MovableContainer's own gesture-based
+move is disabled (ignore_events, set in _buildMovableAt); MoveHandle
+drives its position directly instead.
 
 MovableContainer assumes its content doesn't change size while active
 (its own doc comment), so resizing rebuilds the content (PannableImage
-+ OverlapGroup + MovableContainer) at the new size on each resize-handle
-release, rather than resizing anything in place -- see _buildMovableAt()
-and _onResize().
++ OverlapGroup + MovableContainer) at the new size on every resize-drag
+tick (live, not just once on release), rather than resizing anything in
+place -- see _buildMovableAt() and _onResize(). Rebuilding on every tick
+re-decodes/rescales the image each time, so a live resize is more work
+per frame than a live move or pan; worth watching for lag on slower
+hardware.
 Aspect ratio is preserved (matching the initial image-fit sizing done
 in init()), and the panel's on-screen top-left corner is kept fixed
 across a resize (it grows/shrinks toward the bottom-right, where the
@@ -186,7 +270,8 @@ function PinnedImagePanel:init()
     self._aspect_ratio = panel_w / panel_h
 
     local movable = self:_buildMovableAt(panel_w, panel_h)
-    -- Centered starting position; from there it's user-draggable (hold + pan).
+    -- Centered starting position; from there it's user-draggable via
+    -- MoveHandle (top-left corner).
     self[1] = CenterContainer:new{
         dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
         movable,
@@ -208,9 +293,17 @@ function PinnedImagePanel:_buildMovableAt(panel_w, panel_h, moved_offset)
             -- PannableImage's zoom-driven re-render swaps in a new inner
             -- widget, which needs an explicit repaint -- unlike panning,
             -- which schedules its own via ImageWidget's own
-            -- setDirty("all", ...). Use the widget actually on
-            -- UIManager's window stack (this panel), not the nested one.
-            UIManager:setDirty(panel, "ui")
+            -- setDirty("all", ...). Zooming out shrinks the image inside
+            -- this same fixed-size panel box, so "all" is needed here
+            -- too (not just setDirty(panel, ...)): dirtying only the
+            -- panel repaints *it*, but not the reader page underneath,
+            -- leaving the newly-exposed gap around the smaller image as
+            -- a stale, unrefreshed ghost of whatever was there before --
+            -- same class of bug as the resize ghost fixed in _onResize,
+            -- just inside the panel's bounds instead of at its edge.
+            UIManager:setDirty("all", function()
+                return "ui", panel.movable.dimen
+            end)
         end,
     }
 
@@ -227,19 +320,32 @@ function PinnedImagePanel:_buildMovableAt(panel_w, panel_h, moved_offset)
         end,
     }
 
+    self.move_handle = MoveHandle:new{
+        icon_file = self.plugin_path .. "/icons/move.svg",
+        callback = function(dx, dy)
+            panel:_onMove(dx, dy)
+        end,
+    }
+
     self.overlap = OverlapGroup:new{
         dimen = Geom:new{ w = panel_w, h = panel_h },
         self.pannable_image,
         self.close_button,
         self.resize_handle,
+        self.move_handle,
     }
 
-    -- Let PannableImage decline Hold-family gestures landing on these
-    -- corner icons -- it's tried first in dispatch order (array index 1
-    -- above) but doesn't know its siblings' bounds on its own.
-    self.pannable_image.exclude_widgets = { self.close_button, self.resize_handle }
+    -- Let PannableImage decline Pan gestures originating on these corner
+    -- icons -- it's tried first in dispatch order (array index 1 above)
+    -- but doesn't know its siblings' bounds on its own.
+    self.pannable_image.exclude_widgets = { self.close_button, self.resize_handle, self.move_handle }
 
     self.movable = MovableContainer:new{
+        -- Movement is driven entirely by MoveHandle now (see its own
+        -- comment) -- disable MovableContainer's own gesture-based move
+        -- so it can't compete with PannableImage's Pan-based image
+        -- panning over the rest of the panel.
+        ignore_events = { "touch", "hold", "hold_pan", "hold_release", "pan", "pan_release", "swipe" },
         self.overlap,
     }
     if moved_offset then
@@ -286,6 +392,29 @@ function PinnedImagePanel:_onResize(dw, dh)
     -- panel), scoped to the combined old+new region rather than a full-
     -- screen flash. The region is computed lazily so it picks up the new
     -- movable's dimen only after it's actually been painted.
+    local panel = self
+    UIManager:setDirty("all", function()
+        local update_region = panel.movable.dimen
+        if orig_dimen then
+            update_region = orig_dimen:combine(update_region)
+        end
+        return "ui", update_region
+    end)
+end
+
+-- Applied immediately on every drag tick (see MoveHandle:onPan),
+-- not accumulated for a single call on release, so the panel tracks the
+-- finger/cursor live -- same idea as PannableImage's live image panning.
+-- Mutates the *existing* MovableContainer's offset directly (unlike
+-- _onResize, which rebuilds one at a new size) since moving doesn't
+-- change content size, just position.
+function PinnedImagePanel:_onMove(dx, dy)
+    local orig_dimen = self.movable.dimen and self.movable.dimen:copy()
+    local offset = self.movable:getMovedOffset()
+    self.movable:setMovedOffset{ x = offset.x + dx, y = offset.y + dy }
+
+    -- Same "all" + combined old/new region approach as _onResize, so the
+    -- vacated strip the panel is moving away from gets repainted too.
     local panel = self
     UIManager:setDirty("all", function()
         local update_region = panel.movable.dimen
