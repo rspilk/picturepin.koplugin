@@ -239,6 +239,11 @@ function PinnedImagePanel:_onResize(dw, dh)
     -- bottom-right, where the handle lives.
     local old_x = self.movable.dimen and self.movable.dimen.x
     local old_y = self.movable.dimen and self.movable.dimen.y
+    -- Capture the pre-resize footprint. When shrinking, the vacated strip
+    -- (old footprint minus new footprint) needs to be told to repaint too,
+    -- or it's left as a stale, unrefreshed ghost -- mirroring
+    -- MovableContainer's own _moveBy, which does the same for drag moves.
+    local orig_dimen = self.movable.dimen and self.movable.dimen:copy()
 
     local new_w = self._panel_w + dw
     new_w = math.max(MIN_PANEL_W, math.min(new_w, Screen:getWidth()))
@@ -259,7 +264,19 @@ function PinnedImagePanel:_onResize(dw, dh)
     end
 
     self[1][1] = self:_buildMovableAt(new_w, new_h, moved_offset)
-    UIManager:setDirty(self, "ui")
+
+    -- "all" so the page content underneath also redraws (not just this
+    -- panel), scoped to the combined old+new region rather than a full-
+    -- screen flash. The region is computed lazily so it picks up the new
+    -- movable's dimen only after it's actually been painted.
+    local panel = self
+    UIManager:setDirty("all", function()
+        local update_region = panel.movable.dimen
+        if orig_dimen then
+            update_region = orig_dimen:combine(update_region)
+        end
+        return "ui", update_region
+    end)
 end
 
 return PinnedImagePanel
