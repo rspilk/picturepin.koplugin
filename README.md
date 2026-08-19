@@ -16,9 +16,3 @@ emulator, no core KoReader changes required.
 
 Copy this whole folder (`picturepin.koplugin/`) into KoReader's
 `plugins/` directory, then restart KoReader.
-
-## Docs
-
-- [`SPEC.md`](SPEC.md) — feature scope, design decisions, what's
-  explicitly out of scope.
-- [`PLAN.md`](PLAN.md) — phased implementation history.
